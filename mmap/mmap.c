@@ -4,7 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <signal.h>
-
+#include <unistd.h>
 
 #define PAGE_SIZE 0x1000
 
@@ -46,9 +46,10 @@ void setup_persistent(char *file)
 	segment_end = PAGE_ALIGN_DOWN(__stop_persistent);
 	segment_len = segment_end - segment_start;
 
-    fd = open(file, O_RDWR);
+    fd = open(file, O_CREAT | O_RDWR);
     if (fd < 0)
 		perror("open"), exit(1);
+	ftruncate(fd, segment_len);
 	if (munmap((char *)segment_start, segment_len) < 0)
 		perror("munmap"), exit(1);
 	if (mmap((char *)segment_start, segment_len, PROT_READ | PROT_WRITE, MAP_FIXED | MAP_SHARED, fd, 0) == MAP_FAILED)
