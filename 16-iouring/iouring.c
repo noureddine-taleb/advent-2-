@@ -117,6 +117,11 @@ struct ring {
     // The file descriptor to the created uring.
     int ring_fd;
 
+    int size;
+    // A per-second statistic about the performed I/O
+    unsigned read_blocks; // Number of read blocks
+    ssize_t  read_bytes; // How many bytes where read
+
     // The params that we have received from the kernel
     struct io_uring_params params;
 
@@ -128,7 +133,7 @@ struct ring {
     unsigned *sring;       // An array of length params.sq_entries
     unsigned *sring_tail;  // Pointer to the tail index
     unsigned  sring_mask;  // Apply this mask to (*sring_tail) to get the next free sring entry
-
+    unsigned *sring_array;
     // The SQE array (mapping 2)
     //
     // An SQE is like a system call that you prepare in this array and
@@ -141,52 +146,145 @@ struct ring {
     unsigned *cring_tail; // Pointer to the tail index (written by the kernel, read by us)
     unsigned  cring_mask; // Apply this mask the head index to get the next available CQE
     struct io_uring_cqe *cqes; // Array of CQEs
-};
-
-// Map io_uring into the user space. This includes:
-// - Create all three mappings (submission ring, SQE array, and completion ring)
-// - Derive all pointers in struct ring
-struct ring ring_map(int ring_fd, struct io_uring_params p) {
-    struct ring ring = {
-        .ring_fd = ring_fd,
-        .params = p,
-        .in_flight = 0
-    };
-    // HINT: Use PROT_READ, PROT_WRITE, MAP_SHARED, and MAP_POPULATE
-    // HINT: The three mappings use three magic mmap offsets: IORING_OFF_SQ_RING, IORING_OFF_SQES, IORING_OFF_CQ_RING
-    // HINT: Dereference the {sring,cring}_mask directly
-    return ring;
-}
+} ring = {0};
 
 // Submit up to count random-read SQEs into the given file with a
 // _single_ system call. The function returns the number of actually
 // submitted random reads.
-unsigned submit_random_read(struct ring *R, int fd, ssize_t fsize, unsigned count) {
-    // FIXME: Prepare up to count IORING_OP_READ operations
-    // HINT:  Set the sqe->user_data to the address of the used destination buffer
-    // FIXME: Issue a single io_ring_enter() command to submit those SQEs
-    return 0;
+unsigned submit_random_read(int fd, ssize_t fsize, unsigned count) {
+    if (count > ring.size)
+        count = ring.size;
+    
+    int tail = load_aquire(ring.sring_tail);
+    for (int i=0; i < count; i++) {
+        int index = tail & ring.sring_mask;
+        struct io_uring_sqe *sqe = &ring.sqes[index];
+        memset(sqe, 0, sizeof(*sqe));
+        sqe->opcode = IORING_OP_READ;
+        sqe->fd = fd;
+        struct buffer *buf = alloc_buffer(); 
+        sqe->user_data = (unsigned long)buf;
+        sqe->addr = (unsigned long)buf->data;
+        sqe->len = sizeof (free_buffers->data);
+        sqe->off = rand() % fsize;
+
+        ring.sring_array[index] = index;
+        tail++;
+    }
+
+    store_release(ring.sring_tail, tail);
+    if (sys_io_uring_enter(ring.ring_fd, count, 0, 0) != count)
+        die("io_uring_enter: submit");
+    ring.in_flight += count;
+    return count;
 }
 
 // Reap one CQE from the completion ring and copy the CQE to *cqe. If
 // no CQEs are available (*cring_head == *cring_tail), this function
 // returns 0.
-int reap_cqe(struct ring *R, struct io_uring_cqe *cqe) {
-    // FIXME: Check that the cring contains an CQE, if not return 0
-    // FIXME: Extract the CQE into *cqe
-    // FIXME: Forward cring_head by 1 and return 1
-    return 0;
+int reap_cqe(struct io_uring_cqe *cqe) {
+    int _head = load_aquire(ring.cring_head);
+    int _tail = load_aquire(ring.cring_tail);
+    int head = _head & ring.cring_mask, tail = _tail & ring.cring_mask;
+    if (head == tail)
+        return 0;
+    memmove(cqe, &ring.cqes[head], sizeof *cqe);
+    _head++;
+    store_release(ring.cring_head, _head);
+    if (cqe->res < 0)
+        die("iouring read");
+    // ((struct buffer *)cqe->user_data)->data[cqe->res] = 0;
+    return 1;
 }
 
 // This function uses reap_cqe() to extract a filled buffer from the
 // uring. If wait is true, we wait for an CQE with
 // io_uring_enter(min_completions=1, IORING_ENTER_GETEVENTS) if
 // necessary.
-struct buffer * receive_random_read(struct ring *R, bool wait) {
-    // FIXME: Step 1: optimistic reap
-    // FIXME: Step 2: io_uring_enter()
-    // FIXME: Step 3: reap again.
+struct buffer * receive_random_read(bool wait) {
+    struct io_uring_cqe cqe;
+try:
+    if (reap_cqe(&cqe))
+        goto success;
+    else if (wait) {
+        if (sys_io_uring_enter(ring.ring_fd, 0, 1, IORING_ENTER_GETEVENTS) < 0)
+            die("sys_io_uring_enter: wait");
+        wait = 0;
+        goto try;
+    }
     return NULL;
+success:
+    ring.read_bytes += cqe.res;
+    ring.read_blocks++;
+    ring.in_flight--;
+    return  (struct buffer *)cqe.user_data;
+}
+
+void setup_uring() {
+    char *sq_ptr, *cq_ptr;
+    struct io_uring_params *p = &ring.params;
+
+    /* See io_uring_setup(2) for io_uring_params.flags you can set */
+    memset(p, 0, sizeof(ring.params));
+    ring.ring_fd = sys_io_uring_setup(ring.size, p);
+    if (ring.ring_fd < 0)
+        die("io_uring_setup");
+
+    /*
+    * io_uring communication happens via 2 shared kernel-user space ring
+    * buffers, which can be jointly mapped with a single mmap() call in
+    * kernels >= 5.4.
+    */
+
+    int sring_sz = p->sq_off.array + p->sq_entries * sizeof(unsigned);
+    int cring_sz = p->cq_off.cqes + p->cq_entries * sizeof(struct io_uring_cqe);
+
+    /* Rather than check for kernel version, the recommended way is to
+    * check the features field of the io_uring_params structure, which is a
+    * bitmask. If IORING_FEAT_SINGLE_MMAP is not set, we can do away with the
+    * second mmap() call to map in the completion ring separately.
+    */
+    if (p->features & IORING_FEAT_SINGLE_MMAP) {
+        if (cring_sz > sring_sz)
+            sring_sz = cring_sz;
+        cring_sz = sring_sz;
+    }
+
+    /* Map in the submission and completion queue ring buffers.
+    *  Kernels < 5.4 only map in the submission queue, though.
+    */
+    sq_ptr = mmap(0, sring_sz, PROT_READ | PROT_WRITE,
+                    MAP_SHARED | MAP_POPULATE,
+                    ring.ring_fd, IORING_OFF_SQ_RING);
+    if (sq_ptr == MAP_FAILED)
+        die("mmap");
+
+    if (p->features & IORING_FEAT_SINGLE_MMAP) {
+        cq_ptr = sq_ptr;
+    } else {
+        /* Map in the completion queue ring buffer in older kernels separately */
+        cq_ptr = mmap(0, cring_sz, PROT_READ | PROT_WRITE,
+                        MAP_SHARED | MAP_POPULATE,
+                        ring.ring_fd, IORING_OFF_CQ_RING);
+        if (cq_ptr == MAP_FAILED)
+            die("mmap");
+    }
+    /* Save useful fields for later easy reference */
+    ring.sring_tail = (void *)(sq_ptr + p->sq_off.tail);
+    ring.sring_mask = *(unsigned int *)(sq_ptr + p->sq_off.ring_mask);
+    ring.sring_array = (void *)(sq_ptr + p->sq_off.array);
+
+    /* Map in the submission queue entries array */
+    ring.sqes = mmap(0, p->sq_entries * sizeof(struct io_uring_sqe),
+                    PROT_READ | PROT_WRITE, MAP_SHARED | MAP_POPULATE,
+                    ring.ring_fd, IORING_OFF_SQES);
+    if (ring.sqes == MAP_FAILED)
+        die("mmap");
+    /* Save useful fields for later easy reference */
+    ring.cring_head = (void *)(cq_ptr + p->cq_off.head);
+    ring.cring_tail = (void *)(cq_ptr + p->cq_off.tail);
+    ring.cring_mask = *(unsigned int *)(cq_ptr + p->cq_off.ring_mask);
+    ring.cqes = (void *)(cq_ptr + p->cq_off.cqes);
 }
 
 int main(int argc, char *argv[]) {
@@ -196,7 +294,7 @@ int main(int argc, char *argv[]) {
         return -1;
     }
 
-    int sq_size  = atoi(argv[1]);
+    ring.size  = atoi(argv[1]);
     char *fn     = argv[2];
 
     // Initialize the random number generator with the current time
@@ -214,27 +312,25 @@ int main(int argc, char *argv[]) {
     if (fstat(fd, &s) < 0) die("stat");
     ssize_t fsize = s.st_size;
 
-    struct ring R = {0};
-    (void) sq_size; (void) fsize;
-    // FIXME: Create an io_uring with io_uring_setup(2)
-    // FIXME: Map the ring with:  R = ring_map(ring_fd, params);
+    setup_uring();
     
-    // A per-second statistic about the performed I/O
-    unsigned read_blocks = 0; // Number of read blocks
-    ssize_t  read_bytes  = 0; // How many bytes where read
+    struct buffer *buf;
     while(1) {
-        // FIXME: Submit SQEs up to a certain threshold (e.g. R.params.sq_entries)
-        // FIXME: Reap as many CQEs as possible with waiting exactly once
-        // FIXME: Keep track of the total in_flight requests (submitted - completed)
-
+        submit_random_read(fd, fsize, ring.size - ring.in_flight);
+        int wait = true;
+        while((buf = receive_random_read(wait))) {
+            wait = false;
+            free_buffer(buf);
+        }
         // Every second, we output a statistic ouptu
         struct timeval now2;
         gettimeofday(&now2, NULL);
         if (now.tv_sec < now2.tv_sec) {
-            printf("in_flight: %d, read_blocks/s: %.2fK, read_bytes: %.2f MiB/s\n",
-                   R.in_flight, read_blocks/1000.0, read_bytes / (1024.0 * 1024.0));
-            read_blocks = 0;
-            read_bytes = 0;
+            time_t diff = now2.tv_sec - now.tv_sec;
+            printf("in_flight: %d, read_blocks/s: %ldK, read_bytes: %ld MiB/s\n",
+                   ring.in_flight, ring.read_blocks/1000 / diff, ring.read_bytes / (1024 * 1024) / diff);
+            ring.read_blocks = 0;
+            ring.read_bytes = 0;
         }
         now = now2;
     }
