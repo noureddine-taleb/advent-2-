@@ -1,10 +1,10 @@
 PROG = epoll
 
 ${PROG}: ${PROG}.c
-	gcc $< -o  $@ -Wall -g
+	gcc $< -o  $@ -Wall -Wextra -g
 
 run: ${PROG}
-	yes | ./${PROG}  cat cat cat cat > /dev/null
+	seq 1 10000 | ./${PROG} "grep ^1[1-4]$$" "wc -l" | cat > /dev/null
 
 strace: ${PROG}
 	echo 123 | strace  ./${PROG} cat

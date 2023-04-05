@@ -13,7 +13,6 @@
 #include <assert.h>
 #include <limits.h>
 
-
 #define die(msg) do { perror(msg); exit(EXIT_FAILURE); } while(0)
 
 /* For each filter process, we will generate a proc object */
@@ -92,8 +91,6 @@ static int start_proc(struct proc *proc) {
 }
 
 
-// FIXME: Implement a 'int copy_splice(int in_fd, int out_fd);'
-
 // This function prints an array of uint64_t (elements) as line with
 // throughput measures. The function throttles its output to one line
 // per second.
@@ -140,8 +137,55 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "[%s] Started filter as pid %d\n", procs[i].cmd, procs[i].pid);
     }
 
-    // FIXME: Arrange file descriptors in pairs of input -> output
-    // FIXME: Setup epoll to listen on the input descriptors
-    // FIXME: Receive events and copy data around.
-    // FIXME: call print_throughput from time to time.
+    int  efd = epoll_create1(0);
+    if (efd < 0)
+        die("epoll_create");
+
+    int pairs = nprocs + 1;
+    int read_fds[pairs];
+    int write_fds[pairs];
+
+    read_fds[0] = 0;
+    write_fds[0] = procs[0].stdin;
+    for (int i = 1; i < pairs - 1; i++) {
+        read_fds[i] = procs[i-1].stdout;
+        write_fds[i] = procs[i].stdin;
+    }
+    read_fds[pairs - 1] = procs[nprocs-1].stdout;
+    write_fds[pairs - 1] = 1;
+
+    struct epoll_event event;
+    for (int i = 0; i < pairs; i++) {
+        struct epoll_event event = {
+            .events = EPOLLIN,
+            .data = {
+                .u32 = i,
+            }
+        };
+        if (epoll_ctl(efd, EPOLL_CTL_ADD, read_fds[i], &event) < 0)
+            die("epoll_ctl");
+    }
+
+    uint64_t bytes[pairs];
+    memset(bytes, 0, pairs * sizeof (bytes[0]));
+    int len;
+    while (pairs > 0) {
+        if (epoll_wait(efd, &event, 1, -1) <= 0)
+            die("epoll_wait");
+
+        len = splice(read_fds[event.data.u32], 0, write_fds[event.data.u32], 0, INT_MAX, SPLICE_F_NONBLOCK);
+        if (len < 0 && errno != EAGAIN)
+            die("splice");
+        
+        bytes[event.data.u32] = len;
+        print_throughput(bytes, pairs);
+
+        if (event.events == EPOLLHUP) {
+            if (epoll_ctl(efd, EPOLL_CTL_DEL, read_fds[event.data.u32], NULL) < 0)
+                die("epoll_ctl");
+            close(read_fds[event.data.u32]);
+            close(write_fds[event.data.u32]);
+            pairs--;
+        }
+    }
 }
