@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <linux/futex.h>
 #include <stdint.h>
+#include <string.h>
 #include <sys/time.h>
 #include <sys/syscall.h>
 #include <stdbool.h>
@@ -53,12 +54,20 @@ void sem_init(atomic_int *sem, unsigned initval) {
    decrement it. If it is already zero, we sleep until the value
    becomes larger than zero and try decrementing it again. */
 void sem_down(atomic_int *sem) {
+    while (1) {
+        atomic_int exp = 1;
+        if (atomic_compare_exchange_strong(sem, &exp, 0))
+            return ;
+        futex_wait(sem, 0);
+    }
 }
 
 /* The semaphore increment operation increments the counter and wakes
    up one waiting thread, if there is the possibility of waiting
    threads. */
 void sem_up(atomic_int *sem) {
+    atomic_store(sem, 1);
+    futex_wake(sem, 1);
 }
 
 ////////////////////////////////////////////////////////////////
@@ -86,14 +95,32 @@ struct bounded_buffer {
 };
 
 void bb_init(struct bounded_buffer *bb) {
+    memset(bb, 0, sizeof(*bb));
+    bb->lock = 1;
+    bb->slots = ARRAY_SIZE(bb->data);
 }
 
 void * bb_get(struct bounded_buffer *bb) {
-    void *ret = NULL;
+    futex_wait(&bb->elements, 0);
+    sem_down(&bb->lock);
+    void *ret = bb->data[bb->read_idx++];
+    bb->elements--;
+    bb->slots++;
+    bb->read_idx = bb->read_idx % 3;
+    futex_wake(&bb->slots, 1);
+    sem_up(&bb->lock);
     return ret;
 }
 
 void bb_put(struct bounded_buffer *bb, void *data) {
+    futex_wait(&bb->slots, 0);
+    sem_down(&bb->lock);
+    bb->data[bb->write_idx++] = data;
+    bb->elements++;
+    bb->slots--;
+    bb->write_idx = bb->write_idx % 3;
+    futex_wake(&bb->elements, 1);
+    sem_up(&bb->lock);
 }
 
 
@@ -111,7 +138,6 @@ int main() {
     // We place a semaphore and a bounded buffer instance in our shared memory.
     atomic_int *semaphore     = (void *) &shared_memory[0];
     struct bounded_buffer *bb = (void *) &shared_memory[sizeof(atomic_int)];
-    (void)bb;
 
     // We use this semaphore as a condition variable. The parent
     // process uses sem_down(), which will initially result in
@@ -134,17 +160,21 @@ int main() {
 
         printf("Child has initialized the bounded buffer\n");
 
-        // FIXME: Retrieve elements from the bounded buffer
+        while (1) {
+            char *data = bb_get(bb);
+            printf("%s\n", data);
+        }
     } else {
         ////////////////////////////////////////////////////////////////
         // Child
         char *data[] = {
             "Hello", "World", "!", "How", "are", "you", "?"
         };
-        (void)data;
-        // FIXME: Initialize the bounded buffer after sleeping a second
-        // FIXME: Wake up the parent who is waiting on semaphore
-        // FIXME: Push all char pointers through the bounded buffer to the parent.
+        bb_init(bb);
+        sem_up(semaphore);
+        for (int i=0; i < ARRAY_SIZE(data); i++) {
+            bb_put(bb, data[i]);
+        }
     }
 
     return 0;
