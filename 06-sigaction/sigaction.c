@@ -50,13 +50,43 @@ int syscall_write(char *msg, int64_t number, char base) {
 
 volatile bool do_exit = false;
 
+void handle_sigint(int sig, siginfo_t *info, void *context) {
+    do_exit = true;
+}
+
+void handle_sigsegv(int sig, siginfo_t *info, void *context) {
+    void *addr = mmap(info->si_addr, PAGE_SIZE, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+    if (addr == MAP_FAILED) {
+        perror("mmap");
+    }
+}
+
+void handle_sigill(int sig, siginfo_t *info, void *context) {
+    ((ucontext_t *)context)->uc_mcontext.gregs[REG_RIP] += 4;
+}
+
 int main(void) {
     // We get the actual page-size for this system. On x86, this
     // always return 4096, as this is the size of regular pages on
     // this architecture. We need this in the SIGSEGV handler.
     PAGE_SIZE = sysconf(_SC_PAGESIZE);
 
+    struct sigaction sigint = {
+        .sa_sigaction = handle_sigint,
+        .sa_flags = SA_SIGINFO,
+    };
+    struct sigaction sigsegv = {
+        .sa_sigaction = handle_sigsegv,
+        .sa_flags = SA_SIGINFO,
+    };
+    struct sigaction sigill = {
+        .sa_sigaction = handle_sigill,
+        .sa_flags = SA_SIGINFO,
+    };
 
+    sigaction(SIGINT, &sigint, NULL);
+    sigaction(SIGSEGV, &sigsegv, NULL);
+    sigaction(SIGILL, &sigill, NULL);
     // We generate an invalid pointer that points _somewhere_! This is
     // undefined behavior, and we only hope for the best here. Perhaps
     // we should install a signal handler for SIGSEGV beforehand....
