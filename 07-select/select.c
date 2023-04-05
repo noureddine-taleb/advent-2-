@@ -10,6 +10,7 @@
 #include <pthread.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include "ft_get_next_line/get_next_line.h"
 
 #define die(msg) do { perror(msg); exit(EXIT_FAILURE); } while(0)
 
@@ -99,8 +100,6 @@ static int start_proc(struct proc *proc) {
     }
 }
 
-
-
 int main(int argc, char *argv[]) {
     if (argc <= 1) {
         fprintf(stderr, "usage: %s [CMD-1] (<CMD-2> <CMD-3> ...)", argv[0]);
@@ -122,7 +121,31 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "[%s] Started filter as pid %d\n", procs[i].cmd, procs[i].pid);
     }
 
-    // FIXME: Read from stdin and push data to the proc[*].stdin
-    // FIXME: Use select(2)
-    // FIXME: Read from proc[*].stdout and push data to stdout
+    char buf[256];
+    int ret;
+    char *line;
+
+    while(1) {
+        if (!(line = get_next_line(0)))
+            exit(0);
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        for (int i = 0; i < nprocs; i++) {
+            write(procs[i].stdin, line, strlen(line));
+            FD_SET(procs[i].stdout, &rfds);
+        }
+        struct timeval tv = {
+            .tv_sec = 0,
+            .tv_usec = 1000,
+        };
+        if (select(FD_SETSIZE, &rfds, NULL, NULL, &tv) == 0)
+            continue;
+        for (int i = 0; i < nprocs; i++) {
+            if (FD_ISSET(procs[i].stdout, &rfds)) {
+                ret = read(procs[i].stdout, buf, sizeof buf);
+                buf[ret] = 0;
+                printf("[%s] %s", procs[i].cmd, buf);
+            }
+        }
+    }
 }
