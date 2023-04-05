@@ -57,16 +57,48 @@ int main(int argc, char *argv[]) {
         reset_checksum = true;
         fn = argv[2];
     } else if (argc == 2) {
-        reset_checksum = true;
+        reset_checksum = false;
         fn = argv[1];
     } else {
-        fprintf(stderr, "usage: %s [-r] <FILE>\n", argv[0]);
+        die("usage: checksum [-r] <FILE>\n");
     }
     // Avoid compiler warnings
-    (void) fn; (void) reset_checksum; (void) xattr;
     // FIXME: map the file
+    int fd = open(fn, O_RDONLY);
+    if (fd < 0)
+        die("open");
+    struct stat st;
+    int ret = fstat(fd, &st);
+    if (ret < 0)
+        die("fstat");
+    char *data = mmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    if (data == MAP_FAILED)
+        die("mmap");
+    uint64_t cs = calc_checksum(data, st.st_size);
+    if (reset_checksum) {
+        ret = fsetxattr(fd, xattr, &cs, sizeof cs, 0);
+        if (ret < 0)
+            die("fsetxattr");
+        printf("reset the checksum\n");
+    } else {
+        int ret = fsetxattr(fd, xattr, &cs, sizeof cs, XATTR_CREATE);
+        if (ret == 0) {
+            printf("set the checksum\n");
+        } else if (ret < 0 && errno == EEXIST) {
+            uint64_t oldcs;
+            ret = fgetxattr(fd, xattr, &oldcs, sizeof oldcs);
+            if (ret != sizeof cs)
+                die("fgetxattr");
+            if (oldcs != cs)
+                die("data changed");
+            else
+                printf("checksum matches\n");
+        } else
+            die("fsetxattr");
+    }
     // FIXME: reset the checksum if requested
     // FIXME: calculate the checksum
     // FIXME: get the old checksum and perform checking
     // FIXME: set the new checksum
+    return 0;
 }
