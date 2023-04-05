@@ -7,7 +7,7 @@ ${PROG}: ${PROG}.o rseq-asm.o Makefile
 	gcc -c $< -o  $@ -Wall -g -Wno-unused-function -O3
 
 %.o: %.S
-	gcc -c $< -o  $@ 
+	gcc -g -c $< -o  $@ 
 
 run: ${PROG}
 	./${PROG} 32 regular

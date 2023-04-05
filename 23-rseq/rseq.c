@@ -63,7 +63,7 @@ struct cacheline {
     union {
         char data[64];
         struct {
-            uint64_t        counter;
+            atomic_ullong        counter;
             pthread_mutex_t mutex;   // Used in the lock variant
         };
     };
@@ -103,6 +103,10 @@ int operation_lock(struct rseq*_, struct cacheline *counters) {
 // Variant that uses getcpu() + atomic_fetch_add
 int operation_atomic(struct rseq* _, struct cacheline *counters) {
     // FIXME: Implement variant
+    unsigned int cpu_id;
+
+    getcpu(&cpu_id, NULL);
+    atomic_fetch_add(&counters[cpu_id].counter, 1);
 
     return 0;
 }
@@ -112,7 +116,7 @@ int operation_atomic(struct rseq* _, struct cacheline *counters) {
 // Please look at /usr/include/linux/rseq.h for the documentation of struct rseq
 int operation_rseq_atomic(struct rseq* rs, struct cacheline *counters) {
     // FIXME: Implement variant
-
+    atomic_fetch_add(&counters[rs->cpu_id].counter, 1);
     return 0;
 }
 
@@ -227,7 +231,7 @@ int main(int argc, char *argv[]) {
     // number of threads you can see the thread migration.
     uint64_t sum = 0;
     for (uint32_t i = 0; i < CPUS; i++) {
-        fprintf(stderr, "counter[cpu=%d] = %ld\n", i, args.counters[i].counter);
+        fprintf(stderr, "counter[cpu=%d] = %lld\n", i, args.counters[i].counter);
         sum += args.counters[i].counter;
     }
 
