@@ -42,25 +42,45 @@ typedef struct {
 // Spawn a function within a seccomp-restricted child process
 secure_func_t spawn_secure(void (*func)(void*, int), void* arg) {
     // FIXME: Create a pipe pair with pipe2(2)
-    // FIXME: fork a child process
-    // FIXME: In child, close all file descriptors besides the write end
-    // FIXME: Invoke the given function and kill the child with syscall(__NR_exit, 0)
-    secure_func_t p = {.pid = -1, .pipe = -1};
-    return p;
+    int p[2];
+    if (pipe2(p, 0))
+        die("pipe2");
+    int ret = fork();
+    if (ret < 0)
+        die("exit");
+    if (ret > 0) {
+        secure_func_t r = {
+            .pid = ret,
+            .pipe = p[0],
+        };
+        close(p[1]);
+        return r;
+    }
+    dup2(p[1], 0);
+    sys_close_range(1, INT32_MAX, 0);
+    sys_seccomp(SECCOMP_SET_MODE_STRICT, 0, NULL);
+    func(arg, 0);
+    syscall(__NR_exit, 0);
+    __builtin_unreachable();
 }
 
 // Complete a previously spawned function and read at most bulen bytes
 // into buf. The function returns -1 on error or the number of
 // actually read bytes.
 int complete_secure(secure_func_t f, char *buf, size_t buflen) {
-    // FIXME: read from the child pipe
-    // FIXME: waitpid() for the child to exit
-    return -1;
+    int ret;
+    ret = read(f.pipe, buf, buflen);
+    int status;
+    if (waitpid(f.pid, &status, 0) < 0)
+        die("waitpid");
+    if (WIFEXITED(status) && WEXITSTATUS(status) == 0)
+        return  ret;
+    return WIFEXITED(status) ? -WEXITSTATUS(status) : -WTERMSIG(status);
 }
 
 // Test function that is valid
 void ok(void *arg, int fd) {
-    write(fd, "Hallo", 5);
+    write(fd, "Halo", 5);
 }
 
 // test function that is quite bad
