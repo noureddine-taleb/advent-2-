@@ -18,6 +18,8 @@
 #include <errno.h>
 #include <unistd.h>
 
+#define die(msg) do { perror(msg); exit(EXIT_FAILURE); } while(0)
+
 /* For our clone experiments, we working on a very low level and
  * fiddle around with threading. However, this leads to a problem with
  * the libc, which must perform some user-space operations to setup a
@@ -63,8 +65,17 @@ char stack[4096];
 // both namespaces
 volatile int counter = 0;
 
-int child_entry(void* arg) {
+int child_entry(void* new_userns) {
     // We just give a little bit of information to the user. 
+    if (new_userns)
+    {
+        int fd = open("/proc/self/uid_map", O_WRONLY);
+        if (fd < 0)
+            die("open");
+        if (dprintf(fd, "0 1000 1") < 0)
+            die("dprintf");
+        system("/bin/bash");
+    }
     syscall_write(": Hello from child_entry", 0);
     syscall_write(": getppid() = ", getppid()); // What is our parent PID
     syscall_write(": getpid()  = ", getpid());  // What is our thread group/process id
@@ -95,6 +106,8 @@ int main(int argc, char *argv[]) {
         return -1;
     }
 
+    char *mode = argv[1];
+
     syscall_write("> Hello from main!", 0);
     syscall_write("> getppid() = ", getppid());
     syscall_write("> getpid()  = ", getpid());
@@ -103,17 +116,29 @@ int main(int argc, char *argv[]) {
 
     int flags = 0;
     void *arg = NULL;
-    if (!strcmp(argv[1], "fork")) {
+    if (!strcmp(mode, "fork")) {
+        int ret = clone(child_entry, stack + sizeof stack, 0, NULL);
+        if (ret < 0)
+            die("clone");
+    } else if (!strcmp(mode, "chimera")) {
+        int ret = clone(child_entry, stack + sizeof stack, CLONE_VM, NULL);
+        if (ret < 0)
+            die("clone");
+    } else if (!strcmp(mode, "thread")) {
+        int ret = clone(child_entry, stack + sizeof stack, CLONE_VM|CLONE_SIGHAND|CLONE_THREAD, NULL);
+        if (ret < 0)
+            die("clone");
+    } else if (!strcmp(mode, "user")) {
+        int ret = clone(child_entry, stack + sizeof stack, CLONE_NEWUSER, 1);
+        if (ret < 0)
+            die("clone");
     } else {
-        // TODO: Implement multiple clone modes.
-        printf("Invalid clone() mode: %s\n", argv[1]);
-        return -1;
+        die("Invalid clone() mode\n");
     }
-    // TODO: Call clone here!
 
     syscall_write("\n!!!!! Press C-c to terminate. !!!!!", 0);
     while(counter < 4) {
-        syscall_write("counter = ", counter);
+        syscall_write("parent counter = ", counter);
         sleep(1);
     }
 
