@@ -1,8 +1,12 @@
-mmap: mmap.c
-	gcc mmap.c -o mmap -static
+TARGET := mmap
+SRCS := mmap.c
 
-run: ./mmap
-	./mmap
+all: $(TARGET)
 
-strace: ./mmap
-	strace -ff ./mmap thread
+$(TARGET): $(SRCS)
+	$(CC) $(CFLAGS) -o $@ $^
+
+clean:
+	$(RM) $(TARGET)
+
+re: clean all
