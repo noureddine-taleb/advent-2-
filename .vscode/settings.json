@@ -1,0 +1,22 @@
+{
+    "files.associations": {
+        "get_next_line.h": "c",
+        "*.inc": "c",
+        "dirent.h": "c",
+        "assert.h": "c",
+        "object.h": "c",
+        "array": "c",
+        "compare": "c",
+        "functional": "c",
+        "ratio": "c",
+        "tuple": "c",
+        "type_traits": "c",
+        "utility": "c",
+        "variant": "c",
+        "stddef.h": "c",
+        "limits.h": "c",
+        "socket.h": "c",
+        "rseq.h": "c",
+        "stdlib-bsearch.h": "c"
+    }
+}
