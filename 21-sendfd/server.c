@@ -6,6 +6,7 @@
 #include <stdbool.h>
 #include <assert.h>
 #include <limits.h>
+#include <stddef.h>
 #include <sys/un.h>
 #include <sys/socket.h>
 
@@ -20,14 +21,54 @@
 // buf, buflen: Message to send, arbitary data
 // fd:          file descriptor to transfer
 void sendfd(int sockfd, void *buf, size_t buflen, int fd) {
-    // FIXME: Perpare an struct msghdr with an msg_control buffer
-    // FIXME: Attach the file descriptor as cmsg (see cmsg(3), unix(7))
-    // FIXME: Use sendmsg(2) to send the file descriptor and the message to the other process.
+    struct msghdr msg = { 0 };
+    struct cmsghdr *cmsg;
+    struct iovec io = {
+        .iov_base = buf,
+        .iov_len = buflen,
+    };
+    union {         /* Ancillary data buffer, wrapped in a union
+                        in order to ensure it is suitably aligned */
+        char buf[CMSG_SPACE(sizeof(fd))];
+        struct cmsghdr __align;
+    } u;
+
+    msg.msg_iov = &io;
+    msg.msg_iovlen = 1;
+    msg.msg_control = u.buf;
+    msg.msg_controllen = sizeof(u.buf);
+    cmsg = CMSG_FIRSTHDR(&msg);
+    cmsg->cmsg_level = SOL_SOCKET;
+    cmsg->cmsg_type = SCM_RIGHTS;
+    cmsg->cmsg_len = CMSG_LEN(sizeof(fd));
+    *(int *)CMSG_DATA(cmsg) = fd;
+    if (sendmsg(sockfd, &msg, 0) < 0)
+        die("sendmsg");
 }
 
 int main() {
-    // FIXME: Create an socket with AF_UNIX and SOCK_SEQPACKET
-    // FIXME: Bind it to a filename and listen
-    // FIXME: Accept clients, send your STDOUT, and directly close the connection again
+    int fd = socket(AF_UNIX, SOCK_SEQPACKET, 0);
+    if (fd < 0)
+        die("socket");
+    unlink("socket");
+    struct sockaddr_un addr = {
+        .sun_family = AF_UNIX,
+        .sun_path = "socket",
+    };
+    int ret = bind(fd, &addr, offsetof(struct sockaddr_un, sun_path) + strlen(addr.sun_path) + 1);
+    if (ret < 0)
+        die("bind");
+    if (listen(fd, 10) < 0)
+        die("listen");
+    
+    socklen_t _len;
+    struct sockaddr_un _addr;
+
+    int client = accept(fd, &_addr, &_len);
+    if (client < 0)
+        die("accept");
+
+    char iobuf[1];
+    sendfd(client, iobuf, sizeof iobuf, 1);
 }
 
