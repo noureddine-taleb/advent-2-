@@ -18,17 +18,30 @@
 
 
 #define die(msg) do { perror(msg); exit(EXIT_FAILURE); } while(0)
+ssize_t in_size;
 
 ssize_t copy_write(int fd_in, int fd_out, int *syscalls) {
-    ssize_t ret = 0;
     *syscalls = 0;
-    return ret;
+    size_t copied = 0;
+    char buf[128 * 1024];
+    int ret;
+    while (copied < in_size) {
+        ret = read(fd_in, buf, sizeof buf);
+        ret = write(fd_out, buf, ret);
+        copied += ret;
+        *syscalls += 2;
+    }
+    return copied;
 }
 
 ssize_t copy_sendfile(int fd_in, int fd_out, int *syscalls) {
-    ssize_t ret = 0;
     *syscalls = 0;
-    return ret;
+    size_t copied = 0;
+    while (copied < in_size) {
+        copied += sendfile(fd_out, fd_in, NULL, in_size);
+        *syscalls += 1;
+    }
+    return copied;
 }
 
 // This function measures the given copy implementation.
@@ -43,7 +56,7 @@ double measure(int fd_in, int fd_out, char *banner, ssize_t (*copy)(int, int, in
     // fd_out: truncate the file to zero bytes.
     if (lseek(fd_in, 0, SEEK_SET) < 0) die("lseek");
     if (ftruncate(fd_out, 0) < 0)      die("ftruncate");
-
+    
     // Measure the start time.
     struct timespec start, end;
     if (clock_gettime(CLOCK_REALTIME, &start) < 0)
@@ -64,11 +77,12 @@ double measure(int fd_in, int fd_out, char *banner, ssize_t (*copy)(int, int, in
     double delta = end.tv_sec - start.tv_sec;
     delta += (end.tv_nsec - start.tv_nsec) / 1e9;
 
+    double speed = (bytes /delta) / 1024.0 / 1024.0;
     // Print out some nicely formatted message
     printf("[%10s] copied with %.2f MiB/s (in %.2f s, %d syscalls)\n",
-           banner, (bytes /delta) / 1024.0 / 1024.0, delta, syscalls);
+           banner, speed, delta, syscalls);
 
-    return bytes / delta;
+    return speed;
 }
 
 int main(int argc, char *argv[]) {
@@ -95,6 +109,8 @@ int main(int argc, char *argv[]) {
     // cache. With this, the input file should now, if small enough,
     // reside in in the buffer cache.
     int dummy;
+    in_size = lseek(fd_in, 0, SEEK_END);
+    lseek(fd_in, 0, SEEK_SET);
     copy_write(fd_in, fd_out, &dummy);
 
     // The actual measurement
@@ -105,7 +121,11 @@ int main(int argc, char *argv[]) {
     }
 
     // Print the average MiB/s for both copy algorithms
-    printf("sendfile: %.2f MiB/s, read/write: %.2f MiB/s\n",
-           sendfile/rounds/(1024*1024),
-           write/rounds/(1024*1024));
+    sendfile /= rounds;
+    write /= rounds;
+    printf("sendfile: %.2f MiB/s(📈%.2f%%), read/write: %.2f MiB/s\n",
+           sendfile,
+           (sendfile - write) / write * 100,
+           write
+        );
 }
