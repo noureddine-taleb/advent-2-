@@ -95,9 +95,27 @@ void configure_terminal() {
     tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
 }
 
-// FIXME: Create a thread handler body that copies data from src_fd to two
-//        destination file descriptors.
+struct transfer {
+    int src;
+    int dst;
+    int log;
+};
 
+void *transfer_data(void *transfer) {
+    struct transfer *data = transfer;
+    char buf[256];
+    int ret;
+
+    while (1) {
+        if ((ret = read(data->src, buf, sizeof buf)) < 0)
+            die("read");
+        if (write(data->dst, buf, ret) < 0)
+            die("write");
+        if (write(data->log, buf, ret) < 0)
+            die("write");
+    }
+    return NULL;
+}
 
 int main(int argc, char *argv[]) {
     if (argc < 4) {
@@ -108,13 +126,46 @@ int main(int argc, char *argv[]) {
     char *IN     = argv[2];
     char **CMD   = &argv[3];
 
-    (void) IN; (void) OUT; (void) CMD; (void) exec_in_pty;
-    // FIXME: Open OUT and IN file
-    // FIXME: Create a new primary PTY device (see pty(7))
-    // FIXME: Get the PTN with ioctl(fd, TIOCGPTN, &pts)
-    // FIXME: Open the child pty end (/dev/pts/{PTN})
+    int in = open(IN, O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC, S_IWUSR | S_IRUSR);
+    if (in < 0)
+        die("open");
+    int out = open(OUT, O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC, S_IWUSR | S_IRUSR);
+    if (out < 0)
+        die("open");
+    int ptm;
+    if ((ptm = posix_openpt(O_RDWR|O_CLOEXEC|O_NOCTTY)) < 0)
+        die("posix_openpt");
+    if (grantpt(ptm))
+        die("grantpt");
+    if (unlockpt(ptm))
+        die("unlockpt");
+    char *ptsn = ptsname(ptm);
+    if (!ptsn)
+        die("ptsname");
+    int pts;
+    if ((pts = open(ptsn, O_RDWR)) < 0)
+        die("open");
+    configure_terminal();
 
-    // FIXME: Spawn CMD into secondary_fd pty
-    // FIXME: Create two threads to copy data around
-    // FIXME: Use the main thread to waitpid(2) for the child to exit.
+    pid_t child;
+    child = exec_in_pty(CMD, pts);
+
+    pthread_t reader, writer;
+    struct transfer rtransfer = {
+        .dst = 1,
+        .src = ptm,
+        .log = out,
+    };
+    struct transfer wtransfer = {
+        .dst = ptm,
+        .src = 1,
+        .log = in,
+    };
+    if (pthread_create(&reader, NULL, transfer_data, &rtransfer) < 0)
+        die("pthread_create");
+    if (pthread_create(&writer, NULL, transfer_data, &wtransfer) < 0)
+        die("pthread_create");
+    if (waitpid(child, NULL, 0) < 0)
+        die("waitpid");
+    exit(0);
 }
