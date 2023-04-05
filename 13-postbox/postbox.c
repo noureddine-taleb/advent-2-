@@ -21,6 +21,7 @@
 #include <signal.h>
 #include <sys/signalfd.h>
 #include <mqueue.h>
+#include <stddef.h>
 
 #define die(msg) do { perror(msg); exit(EXIT_FAILURE); } while(0)
 
@@ -36,7 +37,7 @@ void epoll_add(int epoll_fd, int fd, int events) {
     if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, fd, &ev) == -1) {
         die("epoll_ctl: activate");
     }
-     }
+}
 
 // Remove a file descriptor from the interest list.
 void epoll_del(int epoll_fd, int fd) {
