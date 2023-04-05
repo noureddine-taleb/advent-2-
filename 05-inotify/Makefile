@@ -9,3 +9,4 @@ strace: ./inotify
 
 clean:
 	rm -f ./inotify
+p

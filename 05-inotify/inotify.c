@@ -48,15 +48,32 @@ struct {
 // We already know this macro from yesterday.
 #define ARRAY_SIZE(arr) (sizeof(arr)/sizeof(*(arr)))
 
+char *get_event_name(int mask) {
+    for  (int i=0; i < ARRAY_SIZE(inotify_event_flags); i++) {
+        if (inotify_event_flags[i].mask & mask)
+            return inotify_event_flags[i].name;
+    }
+    return NULL;
+}
+
 int main(void) {
     // We allocate a buffer to hold the inotify events, which are
     // variable in size.
+    int fd;
     void *buffer = malloc(4096);
     if (!buffer) return -1;
 
-    // FIXME: Create Inotify Object (into inotify_fd)
-    // FIXME: Add new watch to that event (result into watch_fd)
-    // FIXME: Use read() and the buffer to retrieve results from the inotify_fd
+    if ((fd = inotify_init()) < 0)
+        return perror("inotify_init"), -1;
+
+    if (inotify_add_watch(fd, ".", IN_ALL_EVENTS) < 0)
+        return perror("inotify_add_watch"), -1;
+
+    while (1) {
+        read(fd, buffer, 4096);
+        struct inotify_event *event = buffer;
+        printf("%s (%x)%s\n", event->name, event->mask, get_event_name(event->mask));
+    }
     // As we are nice, we free the buffer again.
     free(buffer);
     return 0;
