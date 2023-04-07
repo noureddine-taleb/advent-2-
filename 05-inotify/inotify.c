@@ -4,6 +4,8 @@
 #include <stdbool.h>
 #include <unistd.h>
 
+#define die(msg) do { perror(msg); exit(EXIT_FAILURE); } while(0)
+
 /* With each inotify event, the kernel supplies us with a bit mask
  * that indicates the cause of the event. With the following table,
  * with one flag per line, you can decode the mask of events.
@@ -70,9 +72,20 @@ int main(void) {
         return perror("inotify_add_watch"), -1;
 
     while (1) {
-        read(fd, buffer, 4096);
-        struct inotify_event *event = buffer;
-        printf("%s (%x)%s\n", event->name, event->mask, get_event_name(event->mask));
+        int ret = read(fd, buffer, 4096);
+        if (ret < 0)
+            die("read");
+        int off = 0;
+        for (
+            struct inotify_event *event = buffer;
+            off < sizeof buffer
+                && off < ret
+            ;
+            off += sizeof(*event) + event->len,
+            event = buffer + off
+        ) {
+            printf("%s (%x)%s\n", event->name, event->mask, get_event_name(event->mask));
+        }
     }
     // As we are nice, we free the buffer again.
     free(buffer);

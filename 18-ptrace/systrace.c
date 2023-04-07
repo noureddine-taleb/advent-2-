@@ -49,12 +49,13 @@ void start_proc(char **cmd) {
         if (WIFEXITED(wstatus))
             exit(WEXITSTATUS(wstatus));
 
-        ptrace(PTRACE_SETOPTIONS, pid, 0, PTRACE_O_TRACESYSGOOD);
+        if (ptrace(PTRACE_SETOPTIONS, pid, 0, PTRACE_O_TRACESYSGOOD) < 0)
+            die("parent ptrace");
         return;
     }
 
     if (ptrace(PTRACE_TRACEME) < 0)
-        die("ptrace");
+        die("child ptrace");
 
     execvp(*cmd, cmd);
     die("execvp");
